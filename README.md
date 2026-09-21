@@ -8,3 +8,5 @@ Home Assistant add-on repository for the read-only HA Operations Agent connector
 
 The connector initiates outbound HTTPS only and exposes no inbound Home Assistant port.
 
+Version 2.0.1 adds bounded entity discovery by entity ID or friendly name so the
+agent can resolve natural-language device names without requiring manual lookup.

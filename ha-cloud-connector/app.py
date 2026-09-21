@@ -13,7 +13,7 @@ from urllib.parse import quote
 import httpx
 import websocket
 
-from operations import OperationError, ensure_result_size, validate_operation
+from operations import OperationError, ensure_result_size, matches_entity_query, validate_operation
 
 HA_API_URL = "http://supervisor/core/api"
 HA_WS_URL = "ws://supervisor/core/websocket"
@@ -109,12 +109,14 @@ class OperationExecutor:
         if not isinstance(states, list):
             raise OperationError("Home Assistant states response has an invalid shape")
         domain = params.get("domain")
+        query = params.get("query")
         selected = [
             state
             for state in states
             if isinstance(state, dict)
             and isinstance(state.get("entity_id"), str)
             and (domain is None or state["entity_id"].startswith(f"{domain}."))
+            and (query is None or matches_entity_query(state, query))
         ][: params["max_results"]]
         return [_bounded_state(state) for state in selected]
 

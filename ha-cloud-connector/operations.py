@@ -47,7 +47,7 @@ def validate_operation(operation: Any, params: Any) -> tuple[str, dict[str, Any]
         raise OperationError("params must be an object")
 
     allowed = {
-        "list_entities": {"domain", "max_results"},
+        "list_entities": {"domain", "query", "max_results"},
         "get_state": {"entity_id"},
         "get_history": {"entity_ids", "hours", "max_results"},
         "get_logbook": {"entity_id", "hours", "max_results"},
@@ -66,6 +66,14 @@ def validate_operation(operation: Any, params: Any) -> tuple[str, dict[str, Any]
             if not isinstance(domain, str) or len(domain) > 64 or not _DOMAIN.fullmatch(domain):
                 raise OperationError("domain has an invalid format")
             clean["domain"] = domain
+        query = params.get("query")
+        if query is not None:
+            if not isinstance(query, str):
+                raise OperationError("query must be a string")
+            query = query.strip()
+            if not query or len(query) > 100 or any(ord(character) < 32 for character in query):
+                raise OperationError("query has an invalid format")
+            clean["query"] = query
         clean["max_results"] = _bounded_int(params.get("max_results", 100), "max_results", 1, MAX_ENTITIES)
     elif operation == "get_state":
         clean["entity_id"] = _entity_id(params.get("entity_id"))
@@ -103,6 +111,13 @@ def ensure_result_size(value: Any) -> None:
         raise OperationError("operation returned data that is not JSON serializable") from exc
     if size > MAX_RESULT_BYTES:
         raise OperationError(f"operation result exceeds the {MAX_RESULT_BYTES}-byte limit")
+
+
+def matches_entity_query(state: dict[str, Any], query: str) -> bool:
+    attributes = state.get("attributes")
+    friendly_name = attributes.get("friendly_name", "") if isinstance(attributes, dict) else ""
+    haystack = f"{state.get('entity_id', '')} {friendly_name}".casefold()
+    return all(term in haystack for term in query.casefold().split())
 
 
 def _entity_id(value: Any) -> str:
