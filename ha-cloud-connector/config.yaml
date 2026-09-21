@@ -1,0 +1,27 @@
+name: HA Cloud Connector
+slug: ha_cloud_connector
+description: Read-only outbound connector for the HA Operations Agent V2 gateway
+version: "2.0.0"
+url: https://github.com/KalleBlomq/HA-Operations-AddOns
+startup: application
+boot: auto
+init: false
+homeassistant_api: true
+arch:
+  - amd64
+  - aarch64
+  - armv7
+options:
+  gateway_url: ""
+  instance_id: ""
+  connector_token: ""
+  poll_interval_seconds: 2
+  request_timeout_seconds: 30
+  verify_ssl: true
+schema:
+  gateway_url: url
+  instance_id: str
+  connector_token: password
+  poll_interval_seconds: int(1,60)
+  request_timeout_seconds: int(5,120)
+  verify_ssl: bool
