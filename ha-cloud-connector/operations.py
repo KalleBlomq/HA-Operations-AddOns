@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 ALLOWED_OPERATIONS = frozenset(
@@ -13,6 +14,10 @@ ALLOWED_OPERATIONS = frozenset(
         "get_automation_config",
         "get_automation_traces",
         "get_system_health",
+        "list_config_files",
+        "get_config_file",
+        "list_dashboards",
+        "get_dashboard",
     }
 )
 MAX_RESULT_BYTES = 262_144
@@ -21,10 +26,29 @@ MAX_HISTORY_ENTITIES = 20
 MAX_LOOKBACK_HOURS = 72
 MAX_TRACES = 20
 MAX_LOG_ENTRIES = 50
+MAX_CONFIG_FILE_BYTES = 131_072
 
 _ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 _DOMAIN = re.compile(r"^[a-z0-9_]+$")
 _AUTOMATION_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_CONFIG_PATH = re.compile(
+    r"^(?:(?:configuration|automations|scripts|scenes)\.yaml|"
+    r"(?:packages|dashboards)/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.ya?ml)$"
+)
+_DASHBOARD_ID = re.compile(r"^(?:yaml|storage):[A-Za-z0-9_.-]+$")
+_SENSITIVE_KEY = re.compile(
+    r"(?:password|passwd|token|secret|api[_-]?key|client[_-]?secret|"
+    r"access[_-]?token|authorization|credential)",
+    re.IGNORECASE,
+)
+_ABSOLUTE_URL = re.compile(r"https?://[^\s'\"<>{}\[\]]+", re.IGNORECASE)
+_SENSITIVE_YAML_LINE = re.compile(
+    r"^(\s*[^#\n:]*"
+    r"(?:password|passwd|token|secret|api[_-]?key|client[_-]?secret|"
+    r"access[_-]?token|authorization|credential)"
+    r"[^:\n]*:\s*)(.*)$",
+    re.IGNORECASE,
+)
 
 
 class OperationError(ValueError):
@@ -54,6 +78,10 @@ def validate_operation(operation: Any, params: Any) -> tuple[str, dict[str, Any]
         "get_automation_config": {"automation_id"},
         "get_automation_traces": {"automation_id", "max_results"},
         "get_system_health": {"max_log_entries"},
+        "list_config_files": set(),
+        "get_config_file": {"path"},
+        "list_dashboards": set(),
+        "get_dashboard": {"dashboard_id"},
     }[operation]
     unknown = set(params) - allowed
     if unknown:
@@ -101,6 +129,12 @@ def validate_operation(operation: Any, params: Any) -> tuple[str, dict[str, Any]
         clean["max_log_entries"] = _bounded_int(
             params.get("max_log_entries", 20), "max_log_entries", 1, MAX_LOG_ENTRIES
         )
+    elif operation == "get_config_file":
+        clean["path"] = normalize_config_path(params.get("path"))
+    elif operation == "get_dashboard":
+        clean["dashboard_id"] = _pattern(
+            params.get("dashboard_id"), "dashboard_id", _DASHBOARD_ID, 160
+        )
     return operation, clean
 
 
@@ -120,9 +154,85 @@ def matches_entity_query(state: dict[str, Any], query: str) -> bool:
     return all(term in haystack for term in query.casefold().split())
 
 
+def normalize_config_path(value: Any) -> str:
+    if not isinstance(value, str):
+        raise OperationError("path must be a string")
+    normalized = value.strip().replace("\\", "/")
+    if (
+        not normalized
+        or len(normalized) > 255
+        or normalized.startswith("/")
+        or ".." in normalized.split("/")
+        or not _CONFIG_PATH.fullmatch(normalized)
+    ):
+        raise OperationError("path is not in the read-only config allowlist")
+    return normalized
+
+
+def resolve_config_path(root: Path, relative_path: str) -> Path:
+    normalized = normalize_config_path(relative_path)
+    resolved_root = root.resolve()
+    candidate = resolved_root
+    for part in Path(normalized).parts:
+        candidate /= part
+        if candidate.is_symlink():
+            raise OperationError("symlinks are not allowed in read-only config paths")
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(resolved_root):
+        raise OperationError("path escapes the read-only config root")
+    return resolved
+
+
+def redact_yaml_text(content: str) -> tuple[str, int]:
+    redacted_lines: list[str] = []
+    redaction_count = 0
+    for line in content.splitlines(keepends=True):
+        ending = "\n" if line.endswith("\n") else ""
+        body = line[:-1] if ending else line
+        match = _SENSITIVE_YAML_LINE.match(body)
+        if match and not match.group(2).lstrip().startswith("!secret"):
+            body = f'{match.group(1)}"***REDACTED***"'
+            redaction_count += 1
+        body, url_count = _ABSOLUTE_URL.subn("***REDACTED_URL***", body)
+        redaction_count += url_count
+        redacted_lines.append(body + ending)
+    return "".join(redacted_lines), redaction_count
+
+
+def redact_structured_value(value: Any, key: str = "") -> tuple[Any, int]:
+    if _SENSITIVE_KEY.search(key):
+        return "***REDACTED***", 1
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        count = 0
+        for child_key, child_value in value.items():
+            redacted, child_count = redact_structured_value(child_value, str(child_key))
+            clean[str(child_key)] = redacted
+            count += child_count
+        return clean, count
+    if isinstance(value, list):
+        clean_list = []
+        count = 0
+        for child in value:
+            redacted, child_count = redact_structured_value(child)
+            clean_list.append(redacted)
+            count += child_count
+        return clean_list, count
+    if isinstance(value, str):
+        redacted, count = _ABSOLUTE_URL.subn("***REDACTED_URL***", value)
+        return redacted, count
+    return value, 0
+
+
 def _entity_id(value: Any) -> str:
     if not isinstance(value, str) or len(value) > 255 or not _ENTITY_ID.fullmatch(value):
         raise OperationError("entity_id has an invalid format")
+    return value
+
+
+def _pattern(value: Any, name: str, pattern: re.Pattern[str], maximum: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum or not pattern.fullmatch(value):
+        raise OperationError(f"{name} has an invalid format")
     return value
 
 

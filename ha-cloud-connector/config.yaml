@@ -1,12 +1,15 @@
 name: HA Cloud Connector
 slug: ha_cloud_connector
 description: Read-only outbound connector for the HA Operations Agent V2 gateway
-version: "2.1.0"
+version: "2.2.0"
 url: https://github.com/KalleBlomq/HA-Operations-AddOns
 startup: application
 boot: auto
 init: false
 homeassistant_api: true
+map:
+  - type: config
+    read_only: true
 arch:
   - amd64
   - aarch64
